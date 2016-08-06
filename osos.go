@@ -2,21 +2,43 @@ package main
 
 import (
 	"encoding/json"
-	"log"
-	"fmt"
-	"net/http"
-	"strconv"
 	"github.com/gorilla/mux"
+	"gopkg.in/mgo.v2"
+	"gopkg.in/mgo.v2/bson"
+	"log"
+	"net/http"
 )
 
-type Note struct {
-	Email string `json:"email"`
-	Title string `json:"title"`
-	Time string  `json:"time"`
+var session *mgo.Session
+var noteStore = make(map[string]Note)
+
+type (
+	Note struct {
+		Id    bson.ObjectId `bson:"_id,omitempty"`
+		Email string        `json:"email"`
+		Title string        `json:"title"`
+		Time  string        `json:"time"`
+	}
+
+	DataStore struct {
+		session *mgo.Session
+	}
+)
+
+func (d *DataStore) Close() {
+	d.session.Close()
 }
 
-var noteStore = make(map[string]Note)
-var id int
+func (d *DataStore) C(name string) *mgo.Collection {
+	return d.session.DB("taskdb").C(name)
+}
+
+func NewDataStore() *DataStore {
+	ds := &DataStore{
+		session: session.Copy(),
+	}
+	return ds
+}
 
 //HTTP POST api/notes
 func PostNoteHandler(w http.ResponseWriter, r *http.Request) {
@@ -25,10 +47,15 @@ func PostNoteHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		panic(err)
 	}
-	id++
-	k := strconv.Itoa(id)
-	noteStore[k] = note
-	fmt.Println(note)
+	ds := NewDataStore()
+	defer ds.Close()
+
+	c := ds.C("notes")
+	err = c.Insert(&note)
+	if err != nil {
+		panic(err)
+	}
+
 	j, err := json.Marshal(note)
 
 	if err != nil {
@@ -43,9 +70,16 @@ func PostNoteHandler(w http.ResponseWriter, r *http.Request) {
 //HTTP GET api/notes
 func GetNoteHandler(w http.ResponseWriter, r *http.Request) {
 	var notes []Note
-	for _, v := range noteStore {
-		notes = append(notes, v)
+	ds := NewDataStore()
+	defer ds.Close()
+	c := ds.C("notes")
+
+	iter := c.Find(nil).Iter()
+	result := Note{}
+	for iter.Next(&result) {
+		notes = append(notes, result)
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	j, err := json.Marshal(notes)
 	if err != nil {
@@ -88,8 +122,12 @@ func DeleteNoteHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-
 func main() {
+	var err error
+	session, err = mgo.Dial("localhost")
+	if err != nil {
+		panic(err)
+	}
 	r := mux.NewRouter().StrictSlash(false)
 	r.HandleFunc("/api/notes", GetNoteHandler).Methods("GET")
 	r.HandleFunc("/api/notes", PostNoteHandler).Methods("POST")
@@ -97,7 +135,7 @@ func main() {
 	r.HandleFunc("/api/notes/{id}", DeleteNoteHandler).Methods("DELETE")
 
 	server := &http.Server{
-		Addr: ":8080",
+		Addr:    ":8080",
 		Handler: r,
 	}
 	server.ListenAndServe()
